@@ -5,29 +5,30 @@
  * ~40ms per actor (each Change deep-clones the actor's roll data), and it runs for every actor in the world whether
  * or not this client can see it.
  *
- * During that pass we skip preparation for actors this user can't see, and instead turn the actor's `system`,
- * `items` and `effects` properties into one-shot accessors: the first time anything reads one of them, the accessors
- * are removed and the actor is prepared, so callers always see prepared data. After `ready`, any actor still
- * deferred is prepared in the background, one per idle callback.
+ * During that pass we skip preparation for actors this user can't see. Instead, the `system` property of the actor and
+ * of each of its embedded items becomes a one-shot accessor: the first read of any of them removes all the accessors
+ * and prepares the actor, so callers always see prepared data. (`items`/`effects` are non-configurable, so the
+ * embedded items' `system` stands in for them.) After `ready`, any actor still deferred is prepared in the
+ * background, one per idle callback.
  *
  * Hook order (Foundry v13): init -> i18nInit -> initializeDocuments() -> setup -> canvasInit -> ready
  */
 
 const MODULE_ID = "pf1e-lazy-token-load";
-const LAZY_KEYS = ["system", "items", "effects"];
+const LAZY = Symbol(MODULE_ID);
 
 let inDocumentInit = false;
 const deferred = new Set();
 const stats = { deferred: 0, onDemand: 0, background: 0 };
 
-/** Replace the actor's lazy accessors with the original plain data properties. */
+/** Put back the plain `system` data properties on the actor and its items. */
 function restore(actor) {
-  const saved = actor[`_${MODULE_ID}`];
+  const saved = actor[LAZY];
   if (!saved) return false;
-  delete actor[`_${MODULE_ID}`];
+  delete actor[LAZY];
   deferred.delete(actor);
-  for (const [key, value] of Object.entries(saved)) {
-    Object.defineProperty(actor, key, { value, writable: true, enumerable: true, configurable: true });
+  for (const [target, value] of saved) {
+    Object.defineProperty(target, "system", { value, writable: true, enumerable: true, configurable: true });
   }
   return true;
 }
@@ -39,27 +40,28 @@ function prepareNow(actor) {
   return true;
 }
 
-/** Turn `system`/`items`/`effects` into accessors that prepare the actor on first touch. */
+/** Turn `system` on the actor and its items into accessors that prepare the actor on first touch. */
 function makeLazy(actor) {
-  const saved = {};
-  for (const key of LAZY_KEYS) {
-    const d = Object.getOwnPropertyDescriptor(actor, key);
+  const targets = [actor, ...actor.items];
+  const saved = new Map();
+  for (const target of targets) {
+    const d = Object.getOwnPropertyDescriptor(target, "system");
     if (!d || !d.configurable || !("value" in d)) return false;
-    saved[key] = d.value;
+    saved.set(target, d.value);
   }
-  Object.defineProperty(actor, `_${MODULE_ID}`, { value: saved, writable: true, configurable: true });
-  for (const key of LAZY_KEYS) {
-    Object.defineProperty(actor, key, {
+  Object.defineProperty(actor, LAZY, { value: saved, writable: true, configurable: true });
+  for (const target of targets) {
+    Object.defineProperty(target, "system", {
       configurable: true,
       enumerable: true,
       get() {
-        if (prepareNow(this)) stats.onDemand++;
-        return this[key];
+        if (prepareNow(actor)) stats.onDemand++;
+        return this.system;
       },
-      // Something is re-initializing the actor (e.g. reset on a socket update), which re-prepares it afterwards.
+      // Something is re-initializing the document (e.g. reset on a socket update), which re-prepares it afterwards.
       set(value) {
-        restore(this);
-        this[key] = value;
+        restore(actor);
+        this.system = value;
       },
     });
   }
