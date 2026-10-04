@@ -40,6 +40,28 @@ function prepareNow(actor) {
   return true;
 }
 
+/**
+ * Readers that only need stored (unprepared) data, so a deferred actor can be served its raw `system` without
+ * preparing it. Each entry matches the reader's call site in the stack and checks that raw data gives the same answer
+ * prepared data would; otherwise the actor is prepared as usual.
+ */
+const RAW_READERS = [
+  {
+    // pf1-pow's GM-only ready migration (migrateOldActors) reads every actor's system.skills and adds kmt/ahp when
+    // missing. Prep never removes stored skills, so when both are stored the answer is the same and nothing is written.
+    stack: "/modules/pf1-pow/scripts/hooks/ready.mjs",
+    accepts: (system) => system?.skills?.kmt !== undefined && system?.skills?.ahp !== undefined,
+  },
+];
+stats.rawReads = 0;
+
+function rawReadAllowed(system) {
+  const readers = RAW_READERS.filter((r) => r.accepts(system));
+  if (!readers.length) return false;
+  const stack = new Error().stack ?? "";
+  return readers.some((r) => stack.includes(r.stack));
+}
+
 /** Turn `system` on the actor and its items into accessors that prepare the actor on first touch. */
 function makeLazy(actor) {
   const targets = [actor, ...actor.items];
@@ -55,6 +77,10 @@ function makeLazy(actor) {
       configurable: true,
       enumerable: true,
       get() {
+        if (this === actor && rawReadAllowed(saved.get(actor))) {
+          stats.rawReads++;
+          return saved.get(actor);
+        }
         if (prepareNow(actor)) stats.onDemand++;
         return this.system;
       },
@@ -108,7 +134,8 @@ Hooks.once("setup", () => {
 });
 
 Hooks.once("ready", () => {
-  console.log(`${MODULE_ID} | deferred ${stats.deferred} actors, ${stats.onDemand} prepared on demand before ready`);
+  console.log(`${MODULE_ID} | deferred ${stats.deferred} actors, ${stats.onDemand} prepared on demand before ready, `
+    + `${stats.rawReads} raw reads`);
   const t0 = performance.now();
   const schedule = globalThis.requestIdleCallback ?? ((cb) => setTimeout(() => cb({ timeRemaining: () => 10 }), 50));
   const drain = (deadline) => {

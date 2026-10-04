@@ -38,7 +38,10 @@ Local Foundry 13.351 + PF1 11.11 with lib-wrapper, ckl-roll-bonuses, pf1-pow and
 | Token fix + lazy actors | 3.7s | 13.3s | 25.2s (GM option) |
 | Token fix + constant-change skip | 13.9s | 21.2s | 22.5s |
 | All three (GM option off) | 3.7s | 13.2s | 22.1s |
+| All three + GM option | 3.3s | 13.0s | 15.0s |
 
 With lazy actors on, derived data (AC, CMD, HP, saves, abilities, skills, encumbrance, item state) was identical to a normal load for all 524 actors once background prep finished.
 
-The GM option gives no benefit while pf1-pow is active: its GM-only `ready` migration reads `actor.system` on every actor, which prepares them all before `ready`.
+pf1-pow's GM-only `ready` migration reads `system.skills` on every actor. When both of its skills (`kmt`, `ahp`) are already stored, that read is served from stored data instead of preparing the actor, since preparation never removes stored skills and the migration reaches the same answer. Otherwise the actor is prepared as usual.
+
+Known difference: pf1-psionics attaches its actor helper in its own `ready` hook, so actors prepared after `ready` cache roll data that includes `psionics.powerPoints`, while actors prepared during load do not. Lazily prepared actors are in the same state any actor reaches after its first update in a session.
