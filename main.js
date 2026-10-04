@@ -5,7 +5,12 @@
  * token in the world gets a synthetic actor at load, even on scenes nobody is looking at.
  *
  * Fix: skip _syncSenses while documents are being initialized, then sync the tokens of whichever
- * scene the canvas draws (canvasInit runs before tokens and vision sources are drawn).
+ * scene the canvas draws, before its tokens and vision sources are drawn.
+ *
+ * Canvas#draw runs: canvasInit hooks -> load scene textures (network) -> canvasDraw hook -> draw tokens.
+ * Syncing inside canvasInit would block texture loading behind seconds of actor building, so canvasInit
+ * only queues the tokens and works through them in small slices while the textures download; canvasDraw
+ * finishes whatever is left before any token is drawn.
  * Hook order (Foundry v13): init -> i18nInit -> initializeDocuments() -> setup -> canvasInit -> ready
  */
 
@@ -39,6 +44,24 @@ Hooks.once("setup", () => {
   initializingDocuments = false;
 });
 
+const SLICE_MS = 20;
+let pending = null;
+
+function syncSlice(queue) {
+  if (pending !== queue) return; // a newer canvas draw took over, or canvasDraw already finished the queue
+  const end = performance.now() + SLICE_MS;
+  while (queue.length && performance.now() < end) queue.pop()._syncSenses();
+  if (queue.length) setTimeout(syncSlice, 0, queue);
+  else pending = null;
+}
+
 Hooks.on("canvasInit", (canvas) => {
-  for (const token of canvas.scene?.tokens ?? []) token._syncSenses();
+  pending = [...(canvas.scene?.tokens ?? [])];
+  setTimeout(syncSlice, 0, pending);
+});
+
+Hooks.on("canvasDraw", () => {
+  const queue = pending;
+  pending = null;
+  while (queue?.length) queue.pop()._syncSenses();
 });

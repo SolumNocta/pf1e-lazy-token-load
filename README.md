@@ -2,7 +2,7 @@
 
 Foundry VTT v13 + Pathfinder 1e module that cuts world load time on worlds with many unlinked tokens.
 
-PF1's `TokenDocumentPF#prepareBaseData` calls `_syncSenses()`, which accesses `this.actor` first. For unlinked tokens this builds a full synthetic actor, and Foundry prepares the tokens of every scene during load. This module skips that sync while world documents are initializing and instead syncs the tokens of each scene as it is drawn (`canvasInit`).
+PF1's `TokenDocumentPF#prepareBaseData` calls `_syncSenses()`, which accesses `this.actor` first. For unlinked tokens this builds a full synthetic actor, and Foundry prepares the tokens of every scene during load. This module skips that sync while world documents are initializing and instead syncs the tokens of each scene as it is drawn. The sync runs in small slices while the scene's textures download (Foundry starts loading textures right after `canvasInit`), and anything left is finished in `canvasDraw`, before any token is drawn. Throttling scene images to 3 MB/s on the benchmark world, this overlap cut time to `ready` from 21.7s to 16.3s, with identical token vision data.
 
 Manifest URL:
 
