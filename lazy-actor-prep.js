@@ -115,6 +115,15 @@ Hooks.once("init", () => {
     hint: "As a GM, also defer actors that have no player owner. Reload to apply.",
     scope: "client", config: true, type: Boolean, default: true, requiresReload: true,
   });
+  game.settings.register(MODULE_ID, "backgroundPrep", {
+    name: "Background preparation of deferred actors",
+    hint: "After load, deferred actors are prepared in the background (actors in combat and on navigation scenes "
+      + "first). Smooth: one actor at a time while the browser is idle and you aren't interacting. Fast: as quickly as "
+      + "possible, which can stutter for a while after load. Off: only when something reads the actor's data; fields "
+      + "outside system (changes, sourceInfo, item actions) of untouched actors then stay unprepared. Reload to apply.",
+    scope: "client", config: true, type: String, default: "smooth", requiresReload: true,
+    choices: { smooth: "Smooth", fast: "Fast", off: "Off" },
+  });
 });
 
 Hooks.once("i18nInit", () => {
@@ -133,22 +142,69 @@ Hooks.once("setup", () => {
   inDocumentInit = false;
 });
 
+/** Deferred actors in background order: combatants, then actors linked on the viewed and navigation scenes. */
+function backgroundQueue() {
+  const first = new Set();
+  const add = (actor) => { if (actor && deferred.has(actor)) first.add(actor); };
+  for (const combat of game.combats) {
+    for (const combatant of combat.combatants) if (combatant.token?.actorLink ?? true) add(game.actors.get(combatant.actorId));
+  }
+  for (const scene of [canvas?.scene, ...game.scenes.filter((s) => s.navigation)]) {
+    for (const token of scene?.tokens ?? []) if (token.actorLink) add(game.actors.get(token.actorId));
+  }
+  return [...first, ...[...deferred].filter((a) => !first.has(a))];
+}
+
+const INPUT_QUIET_MS = 750; // smooth mode waits this long after the last user input
+const SMOOTH_GAP_MS = 50; // and leaves at least this much time between two actors
+
 Hooks.once("ready", () => {
   console.log(`${MODULE_ID} | deferred ${stats.deferred} actors, ${stats.onDemand} prepared on demand before ready, `
     + `${stats.rawReads} raw reads`);
+  const mode = game.settings.get(MODULE_ID, "backgroundPrep");
+  if (mode === "off" || !deferred.size) return;
+
+  const queue = backgroundQueue();
   const t0 = performance.now();
-  const schedule = globalThis.requestIdleCallback ?? ((cb) => setTimeout(() => cb({ timeRemaining: () => 10 }), 50));
-  const drain = (deadline) => {
-    do {
-      const actor = deferred.values().next().value;
-      if (!actor) {
-        console.log(`${MODULE_ID} | background prep done: ${stats.background} actors in background, `
-          + `${stats.onDemand} on demand, ${Math.round(performance.now() - t0)}ms wall`);
-        return;
-      }
-      if (prepareNow(actor)) stats.background++;
-    } while (deadline.timeRemaining() > 5);
-    schedule(drain, { timeout: 1000 });
+  const next = () => {
+    while (queue.length) {
+      const actor = queue.shift();
+      if (deferred.has(actor)) return actor;
+    }
+    console.log(`${MODULE_ID} | background prep done (${mode}): ${stats.background} actors in background, `
+      + `${stats.onDemand} on demand, ${Math.round(performance.now() - t0)}ms wall`);
+    return null;
   };
-  schedule(drain, { timeout: 1000 });
+  const idle = globalThis.requestIdleCallback ?? ((cb) => setTimeout(() => cb({ timeRemaining: () => 10, didTimeout: false }), 50));
+
+  if (mode === "fast") {
+    const drain = (deadline) => {
+      do {
+        const actor = next();
+        if (!actor) return;
+        if (prepareNow(actor)) stats.background++;
+      } while (deadline.timeRemaining() > 5);
+      idle(drain, { timeout: 1000 });
+    };
+    idle(drain, { timeout: 1000 });
+    return;
+  }
+
+  // Smooth: one actor per idle period, never while the user is interacting.
+  let lastInput = 0;
+  const onInput = () => { lastInput = performance.now(); };
+  const events = ["pointermove", "pointerdown", "wheel", "keydown"];
+  for (const e of events) window.addEventListener(e, onInput, { capture: true, passive: true });
+  const step = () => {
+    const quietFor = performance.now() - lastInput;
+    if (quietFor < INPUT_QUIET_MS) return void setTimeout(() => idle(step), INPUT_QUIET_MS - quietFor);
+    const actor = next();
+    if (!actor) {
+      for (const e of events) window.removeEventListener(e, onInput, { capture: true });
+      return;
+    }
+    if (prepareNow(actor)) stats.background++;
+    setTimeout(() => idle(step), SMOOTH_GAP_MS);
+  };
+  idle(step);
 });

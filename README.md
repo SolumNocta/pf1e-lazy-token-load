@@ -18,6 +18,10 @@ Client settings (reload to apply):
 
 - **Lazy actor preparation** (default on)
 - **Lazy actor preparation for GM** (default on): as a GM, also defer actors with no player owner
+- **Background preparation of deferred actors** (default Smooth): after `ready`, deferred actors are prepared in the background, actors in combats and actors linked on the viewed and navigation scenes first.
+  - *Smooth*: one actor per idle period, at least 50ms apart, and never within 750ms of mouse, wheel or keyboard input.
+  - *Fast*: as quickly as idle time allows; on a large world this can stutter for a while after load.
+  - *Off*: actors are prepared only when something reads their `system`. Untouched actors keep unprepared `changes`, `sourceInfo` and item actions for the session.
 
 Only reads of `system` trigger preparation. Code that reads other prepared actor fields (`changes`, `sourceInfo`, `itemFlags`) of an untouched actor before `system` sees them unprepared until background prep reaches that actor. Turn the options off if a module misbehaves.
 
