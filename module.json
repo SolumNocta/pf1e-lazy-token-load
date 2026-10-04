@@ -16,5 +16,5 @@
       { "id": "pf1", "type": "system", "compatibility": { "minimum": "11" } }
     ]
   },
-  "esmodules": ["main.js", "lazy-actor-prep.js"]
+  "esmodules": ["main.js", "lazy-actor-prep.js", "constant-change-rolldata.js"]
 }

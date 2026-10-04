@@ -21,6 +21,12 @@ Client settings (reload to apply):
 
 The console logs how many actors were deferred and how many were prepared on demand before `ready`. A high on-demand count means some module reads every actor at startup, which cancels the benefit.
 
+## Skip roll data for constant changes
+
+PF1's `ItemChange#applyChange` deep-clones the actor's roll data on every call, and during data prep every "continuous" change is re-applied after each change. For changes whose formula is empty or a plain number the clone is never read. This wraps `applyChange` (a libWrapper `WRAPPER`, so it sits in front of overrides such as ckl-roll-bonuses') and passes an empty `rollData` for those calls. Formulas still get a fresh clone every time.
+
+Client setting **Skip roll data for constant changes** (default on). On the benchmark world it skips ~17k of ~64k clones during load and saves about 1s of data prep for players and GMs alike; actor `system`, roll data, item data and change values were identical for all 524 actors.
+
 ## Benchmark
 
 Local Foundry 13.351 + PF1 11.11 with lib-wrapper, ckl-roll-bonuses, pf1-pow and pf1-psionics, loading a copy of a live world (524 actors / 13,541 embedded items, 86 scenes / 896 unlinked tokens). Times are to `game.ready`; "prep" is Foundry's own "Prepared World Documents" figure.
@@ -30,6 +36,8 @@ Local Foundry 13.351 + PF1 11.11 with lib-wrapper, ckl-roll-bonuses, pf1-pow and
 | Module disabled | 30.4s | 37.6s | 37.6s |
 | Token fix only | 14.8s | 23.3s | 22.9s |
 | Token fix + lazy actors | 3.7s | 13.3s | 25.2s (GM option) |
+| Token fix + constant-change skip | 13.9s | 21.2s | 22.5s |
+| All three (GM option off) | 3.7s | 13.2s | 22.1s |
 
 With lazy actors on, derived data (AC, CMD, HP, saves, abilities, skills, encumbrance, item state) was identical to a normal load for all 524 actors once background prep finished.
 
