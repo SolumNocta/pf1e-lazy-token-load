@@ -1,0 +1,20 @@
+{
+  "id": "pf1e-lazy-token-load",
+  "title": "PF1e Lazy Token Load",
+  "description": "Skips PF1 token sense syncing for tokens on scenes that aren't being viewed during world load, so their synthetic actors aren't built at startup.",
+  "version": "1.0.0",
+  "authors": [{ "name": "SolumNocta" }],
+  "url": "https://github.com/SolumNocta/pf1e-lazy-token-load",
+  "manifest": "https://github.com/SolumNocta/pf1e-lazy-token-load/releases/latest/download/module.json",
+  "download": "https://github.com/SolumNocta/pf1e-lazy-token-load/releases/download/v1.0.0/module.zip",
+  "compatibility": {
+    "minimum": "13",
+    "verified": "13.351"
+  },
+  "relationships": {
+    "systems": [
+      { "id": "pf1", "type": "system", "compatibility": { "minimum": "11" } }
+    ]
+  },
+  "esmodules": ["main.js"]
+}
