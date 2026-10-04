@@ -113,7 +113,7 @@ Hooks.once("init", () => {
   game.settings.register(MODULE_ID, "lazyActorsGM", {
     name: "Lazy actor preparation for GM",
     hint: "As a GM, also defer actors that have no player owner. Reload to apply.",
-    scope: "client", config: true, type: Boolean, default: false, requiresReload: true,
+    scope: "client", config: true, type: Boolean, default: true, requiresReload: true,
   });
 });
 

@@ -17,7 +17,9 @@ At the end of world load Foundry prepares every world actor. For PF1 that costs 
 Client settings (reload to apply):
 
 - **Lazy actor preparation** (default on)
-- **Lazy actor preparation for GM** (default off): as a GM, also defer actors with no player owner
+- **Lazy actor preparation for GM** (default on): as a GM, also defer actors with no player owner
+
+Only reads of `system` trigger preparation. Code that reads other prepared actor fields (`changes`, `sourceInfo`, `itemFlags`) of an untouched actor before `system` sees them unprepared until background prep reaches that actor. Turn the options off if a module misbehaves.
 
 The console logs how many actors were deferred and how many were prepared on demand before `ready`. A high on-demand count means some module reads every actor at startup, which cancels the benefit.
 
@@ -37,8 +39,8 @@ Local Foundry 13.351 + PF1 11.11 with lib-wrapper, ckl-roll-bonuses, pf1-pow and
 | Token fix only | 14.8s | 23.3s | 22.9s |
 | Token fix + lazy actors | 3.7s | 13.3s | 25.2s (GM option) |
 | Token fix + constant-change skip | 13.9s | 21.2s | 22.5s |
-| All three (GM option off) | 3.7s | 13.2s | 22.1s |
-| All three + GM option | 3.3s | 13.0s | 15.0s |
+| All three, GM option off | 3.7s | 13.2s | 22.1s |
+| All three, GM option on (default) | 3.3s | 13.0s | 15.0s |
 
 With lazy actors on, derived data (AC, CMD, HP, saves, abilities, skills, encumbrance, item state) was identical to a normal load for all 524 actors once background prep finished.
 
