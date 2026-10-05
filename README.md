@@ -12,20 +12,31 @@ https://github.com/SolumNocta/pf1e-lazy-token-load/releases/latest/download/modu
 
 ## Lazy actor preparation
 
-At the end of world load Foundry prepares every world actor. For PF1 that costs roughly 40ms per actor, and it runs even for actors the current user cannot see. With this option on, actors the user has no permission to view skip that pass. The `system` property of each such actor and of its embedded items becomes a one-shot accessor: the first read prepares the actor, so callers always see prepared data. After `ready`, anything still deferred is prepared in the background, one actor per idle callback.
+At the end of world load Foundry prepares every world actor. For PF1 that costs roughly 40ms per actor, and it runs even for actors the current user cannot see. With this option on, actors the user has no permission to view skip that pass. The actor's prepared-data properties (`system`, `statuses`, `changes`, `sourceInfo`, `changeFlags`, `changeOverrides`) and its items' (`system`, `actions`, `changes`) become one-shot accessors: the first read of any of them prepares the actor, so callers always see prepared data. After `ready`, anything still deferred is prepared in the background, one actor per idle callback.
 
 Client settings (reload to apply):
 
 - **Lazy actor preparation** (default on)
 - **Lazy actor preparation for GM** (default on): as a GM, also defer actors with no player owner
+- **Lazy token actor preparation** (default on): see below
 - **Background preparation of deferred actors** (default Smooth): after `ready`, deferred actors are prepared in the background, actors in combats and actors linked on the viewed and navigation scenes first.
   - *Smooth*: one actor per idle period, at least 50ms apart, and never within 750ms of mouse, wheel or keyboard input.
   - *Fast*: as quickly as idle time allows; on a large world this can stutter for a while after load.
   - *Off*: actors are prepared only when something reads their `system`. Untouched actors keep unprepared `changes`, `sourceInfo` and item actions for the session.
 
-Only reads of `system` trigger preparation. Code that reads other prepared actor fields (`changes`, `sourceInfo`, `itemFlags`) of an untouched actor before `system` sees them unprepared until background prep reaches that actor. Turn the options off if a module misbehaves.
+Only `itemFlags` and PF1's internal `_rollData` cache can't be trapped (Foundry makes them non-configurable); code that reads those of an untouched actor before anything else sees them unprepared until the actor is prepared. Turn the options off if a module misbehaves.
 
 The console logs how many actors were deferred and how many were prepared on demand before `ready`. A high on-demand count means some module reads every actor at startup, which cancels the benefit.
+
+## Lazy token actors
+
+Reading `token.actor` on an unlinked token builds a synthetic actor, and PF1 fully prepares it. Some modules do that for every token in the world without needing the data: Sequencer's GM-only ready migration reads `token.actor` for every owned token just to look at a prototype-token flag, and then ignores unlinked tokens anyway. On the benchmark world that cost a GM about 20s per load.
+
+Token actors are now deferred the same way as world actors, using the same one-shot accessors, but at any time rather than only during world load. The tokens of the scene being drawn are prepared before they are drawn; other token actors are prepared only when something reads their data (they are never part of the background pass). Foundry's `Actor` declares `statuses` as a class field, which is initialized after the constructor has already prepared a token actor, so that one property is trapped right after `ActorDelta#_createSyntheticActor` instead.
+
+On the benchmark world with Sequencer 4.2.3, GM time to `ready` went from 30.8s to 16.0s. Derived data, statuses, changes, source info and items were identical for all 524 world actors and all 881 token actors. The only difference in roll data is PF1's transient `dcBonus: 0`, which the roll-data cache holds right after any preparation until the next refresh.
+
+If the Actors directory is slow for a GM: koboldworks-pf1-little-helper's "Enrich Actors Directory" reads every listed actor's prepared data (type, CR) when the directory renders, which prepares all of them. Turning that feature off avoids it.
 
 ## Skip roll data for constant changes
 
@@ -45,6 +56,7 @@ Local Foundry 13.351 + PF1 11.11 with lib-wrapper, ckl-roll-bonuses, pf1-pow and
 | Token fix + constant-change skip | 13.9s | 21.2s | 22.5s |
 | All three, GM option off | 3.7s | 13.2s | 22.1s |
 | All three, GM option on (default) | 3.3s | 13.0s | 15.0s |
+| v1.4.0 defaults, Sequencer 4.2.3 active | 3.4s | 13.6s | 16.0s (v1.3.1: 30.8s) |
 
 With lazy actors on, derived data (AC, CMD, HP, saves, abilities, skills, encumbrance, item state) was identical to a normal load for all 524 actors once background prep finished.
 

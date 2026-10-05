@@ -1,34 +1,43 @@
 /**
- * Lazy world-actor preparation.
+ * Lazy actor preparation.
  *
- * At the end of Game#initializeDocuments Foundry calls _safePrepareData() on EVERY world document. For PF1 that is
- * ~40ms per actor (each Change deep-clones the actor's roll data), and it runs for every actor in the world whether
- * or not this client can see it.
+ * World actors: at the end of Game#initializeDocuments Foundry calls _safePrepareData() on EVERY world document. For
+ * PF1 that is ~40ms per actor, including actors this client may never look at. During that pass we skip actors this
+ * user can't see (as GM: actors with no player owner).
  *
- * During that pass we skip preparation for actors this user can't see. Instead, the `system` property of the actor and
- * of each of its embedded items becomes a one-shot accessor: the first read of any of them removes all the accessors
- * and prepares the actor, so callers always see prepared data. (`items`/`effects` are non-configurable, so the
- * embedded items' `system` stands in for them.) After `ready`, any actor still deferred is prepared in the
- * background, one per idle callback.
+ * Token actors: the synthetic actor of an unlinked token is built and prepared whenever anything reads `token.actor`.
+ * Sequencer's GM-only ready migration, for example, reads it for every owned token in the world just to look at a
+ * prototype token flag. Their preparation is deferred the same way, at any time.
+ *
+ * A deferred actor's prepared-data properties (system, statuses, changes, sourceInfo, changeFlags, changeOverrides)
+ * and its items' (system, actions, changes) become one-shot accessors: the first read of any of them removes all the
+ * accessors and prepares the actor, so callers always see prepared data. Only itemFlags and the internal _rollData
+ * cache can't be trapped (they are non-configurable). After `ready`, deferred world actors are prepared in the
+ * background; token actors are only prepared on demand.
  *
  * Hook order (Foundry v13): init -> i18nInit -> initializeDocuments() -> setup -> canvasInit -> ready
  */
 
 const MODULE_ID = "pf1e-lazy-token-load";
 const LAZY = Symbol(MODULE_ID);
+const ACTOR_KEYS = ["system", "statuses", "changes", "sourceInfo", "changeFlags", "changeOverrides"];
+const ITEM_KEYS = ["system", "actions", "changes"];
 
 let inDocumentInit = false;
-const deferred = new Set();
-const stats = { deferred: 0, onDemand: 0, background: 0 };
+let originalSafePrepare = null;
+const enabled = { worldActors: false, worldActorsGM: false, tokenActors: false };
+const deferred = new Set(); // deferred world actors, worked through by the background pass
+const stats = { deferred: 0, tokenDeferred: 0, onDemand: 0, background: 0, rawReads: 0 };
 
-/** Put back the plain `system` data properties on the actor and its items. */
+/** Put back the original properties on the actor and its items. */
 function restore(actor) {
   const saved = actor[LAZY];
   if (!saved) return false;
   delete actor[LAZY];
   deferred.delete(actor);
-  for (const [target, value] of saved) {
-    Object.defineProperty(target, "system", { value, writable: true, enumerable: true, configurable: true });
+  for (const { target, key, desc } of saved) {
+    if (desc) Object.defineProperty(target, key, desc);
+    else delete target[key];
   }
   return true;
 }
@@ -36,7 +45,7 @@ function restore(actor) {
 /** Restore and prepare a deferred actor. Returns true if work was done. */
 function prepareNow(actor) {
   if (!restore(actor)) return false;
-  actor._safePrepareData();
+  originalSafePrepare.call(actor); // the unpatched method, so the actor can't be deferred again
   return true;
 }
 
@@ -53,7 +62,6 @@ const RAW_READERS = [
     accepts: (system) => system?.skills?.kmt !== undefined && system?.skills?.ahp !== undefined,
   },
 ];
-stats.rawReads = 0;
 
 function rawReadAllowed(system) {
   const readers = RAW_READERS.filter((r) => r.accepts(system));
@@ -62,45 +70,81 @@ function rawReadAllowed(system) {
   return readers.some((r) => stack.includes(r.stack));
 }
 
-/** Turn `system` on the actor and its items into accessors that prepare the actor on first touch. */
-function makeLazy(actor) {
-  const targets = [actor, ...actor.items];
-  const saved = new Map();
-  for (const target of targets) {
-    const d = Object.getOwnPropertyDescriptor(target, "system");
-    if (!d || !d.configurable || !("value" in d)) return false;
-    saved.set(target, d.value);
-  }
-  Object.defineProperty(actor, LAZY, { value: saved, writable: true, configurable: true });
-  for (const target of targets) {
-    Object.defineProperty(target, "system", {
+/**
+ * Actor class fields (`statuses = this.statuses ?? new Set()` in Foundry's Actor). They run right after the base
+ * constructor, which is where a token actor is first prepared, so trapping them then would make the initializer read
+ * the trap (preparing the actor) and then overwrite it. They are trapped after construction instead (trapLate).
+ */
+const CLASS_FIELD_KEYS = new Set(["statuses"]);
+
+/** Replace `entries` with accessors that prepare `actor` on first read. */
+function defineTraps(actor, entries) {
+  const rawSystem = actor[LAZY][0].desc.value;
+  for (const { target, key } of entries) {
+    Object.defineProperty(target, key, {
       configurable: true,
       enumerable: true,
       get() {
-        if (this === actor && rawReadAllowed(saved.get(actor))) {
+        if (target === actor && key === "system" && rawReadAllowed(rawSystem)) {
           stats.rawReads++;
-          return saved.get(actor);
+          return rawSystem;
         }
         if (prepareNow(actor)) stats.onDemand++;
-        return this.system;
+        return target[key];
       },
       // Something is re-initializing the document (e.g. reset on a socket update), which re-prepares it afterwards.
       set(value) {
         restore(actor);
-        this.system = value;
+        target[key] = value;
       },
     });
   }
-  deferred.add(actor);
-  stats.deferred++;
+}
+
+/** Trap class fields that didn't exist yet when the actor was deferred during construction. */
+function trapLate(actor) {
+  const saved = actor?.[LAZY];
+  if (!saved) return;
+  const late = [];
+  for (const key of CLASS_FIELD_KEYS) {
+    if (saved.some((s) => s.target === actor && s.key === key)) continue;
+    const desc = Object.getOwnPropertyDescriptor(actor, key);
+    if (!desc?.configurable || !("value" in desc)) continue;
+    late.push({ target: actor, key, desc });
+  }
+  saved.push(...late);
+  defineTraps(actor, late);
+}
+
+/** Turn the prepared-data properties of the actor and its items into accessors that prepare the actor on first read. */
+function makeLazy(actor) {
+  const saved = [];
+  const collect = (target, keys) => keys.every((key) => {
+    const desc = Object.getOwnPropertyDescriptor(target, key);
+    if (!desc && target === actor && CLASS_FIELD_KEYS.has(key)) return true; // still constructing, see trapLate
+    if (desc ? !desc.configurable || !("value" in desc) : key === "system") return false;
+    saved.push({ target, key, desc });
+    return true;
+  });
+  if (!collect(actor, ACTOR_KEYS)) return false;
+  for (const item of actor.items) if (!collect(item, ITEM_KEYS)) return false;
+
+  Object.defineProperty(actor, LAZY, { value: saved, writable: true, configurable: true });
+  defineTraps(actor, saved);
+  if (actor.isToken) stats.tokenDeferred++;
+  else {
+    deferred.add(actor);
+    stats.deferred++;
+  }
   return true;
 }
 
 function shouldDefer(actor) {
-  if (!inDocumentInit || actor.isToken) return false;
+  if (actor.isToken) return enabled.tokenActors;
+  if (!inDocumentInit || !enabled.worldActors) return false;
   const user = game.user;
   if (!user) return false;
-  if (user.isGM) return game.settings.get(MODULE_ID, "lazyActorsGM") && !actor.hasPlayerOwner;
+  if (user.isGM) return enabled.worldActorsGM && !actor.hasPlayerOwner;
   return !actor.testUserPermission(user, "LIMITED");
 }
 
@@ -115,26 +159,45 @@ Hooks.once("init", () => {
     hint: "As a GM, also defer actors that have no player owner. Reload to apply.",
     scope: "client", config: true, type: Boolean, default: true, requiresReload: true,
   });
+  game.settings.register(MODULE_ID, "lazyTokenActors", {
+    name: "Lazy token actor preparation",
+    hint: "Defer preparing the actors of unlinked tokens until something reads their data. Modules that only touch a "
+      + "token's actor (for example to read a flag) then don't pay for a full PF1 preparation. Reload to apply.",
+    scope: "client", config: true, type: Boolean, default: true, requiresReload: true,
+  });
   game.settings.register(MODULE_ID, "backgroundPrep", {
     name: "Background preparation of deferred actors",
-    hint: "After load, deferred actors are prepared in the background (actors in combat and on navigation scenes "
-      + "first). Smooth: one actor at a time while the browser is idle and you aren't interacting. Fast: as quickly as "
-      + "possible, which can stutter for a while after load. Off: only when something reads the actor's data; fields "
-      + "outside system (changes, sourceInfo, item actions) of untouched actors then stay unprepared. Reload to apply.",
+    hint: "After load, deferred world actors are prepared in the background (actors in combat and on navigation "
+      + "scenes first). Smooth: one actor at a time while the browser is idle and you aren't interacting. Fast: as "
+      + "quickly as possible, which can stutter for a while after load. Off: only when something reads the actor's "
+      + "data. Reload to apply.",
     scope: "client", config: true, type: String, default: "smooth", requiresReload: true,
     choices: { smooth: "Smooth", fast: "Fast", off: "Off" },
   });
 });
 
 Hooks.once("i18nInit", () => {
-  if (!game.settings.get(MODULE_ID, "lazyActors")) return;
+  enabled.worldActors = game.settings.get(MODULE_ID, "lazyActors");
+  enabled.worldActorsGM = enabled.worldActors && game.settings.get(MODULE_ID, "lazyActorsGM");
+  enabled.tokenActors = game.settings.get(MODULE_ID, "lazyTokenActors");
+  if (!enabled.worldActors && !enabled.tokenActors) return;
   // CONFIG.Actor.documentClass is a Proxy in PF1; patch the base class every actor type inherits from.
   const proto = foundry.documents.Actor.prototype;
-  const original = proto._safePrepareData;
+  originalSafePrepare = proto._safePrepareData;
   proto._safePrepareData = function (...args) {
     if (shouldDefer(this) && makeLazy(this)) return;
-    return original.apply(this, args);
+    return originalSafePrepare.apply(this, args);
   };
+  if (enabled.tokenActors) {
+    // Token actors are first prepared inside their constructor; trap the class fields once construction is done.
+    const deltaProto = foundry.documents.ActorDelta.prototype;
+    const originalCreate = deltaProto._createSyntheticActor;
+    deltaProto._createSyntheticActor = function (...args) {
+      const result = originalCreate.apply(this, args);
+      trapLate(this.syntheticActor);
+      return result;
+    };
+  }
   inDocumentInit = true;
 });
 
@@ -159,8 +222,8 @@ const INPUT_QUIET_MS = 750; // smooth mode waits this long after the last user i
 const SMOOTH_GAP_MS = 50; // and leaves at least this much time between two actors
 
 Hooks.once("ready", () => {
-  console.log(`${MODULE_ID} | deferred ${stats.deferred} actors, ${stats.onDemand} prepared on demand before ready, `
-    + `${stats.rawReads} raw reads`);
+  console.log(`${MODULE_ID} | deferred ${stats.deferred} actors and ${stats.tokenDeferred} token actors, `
+    + `${stats.onDemand} prepared on demand before ready, ${stats.rawReads} raw reads`);
   const mode = game.settings.get(MODULE_ID, "backgroundPrep");
   if (mode === "off" || !deferred.size) return;
 

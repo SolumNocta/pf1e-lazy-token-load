@@ -45,12 +45,22 @@ Hooks.once("setup", () => {
 });
 
 const SLICE_MS = 20;
+
+/**
+ * Prepare a token's actor (reading `system` triggers lazy preparation, see lazy-actor-prep.js) and sync its senses.
+ * The explicit read matters because _syncSenses returns early (custom vision rules, system vision off) without
+ * touching the actor, and the token is about to be drawn.
+ */
+function prepareToken(token) {
+  token.actor?.system;
+  token._syncSenses();
+}
 let pending = null;
 
 function syncSlice(queue) {
   if (pending !== queue) return; // a newer canvas draw took over, or canvasDraw already finished the queue
   const end = performance.now() + SLICE_MS;
-  while (queue.length && performance.now() < end) queue.pop()._syncSenses();
+  while (queue.length && performance.now() < end) prepareToken(queue.pop());
   if (queue.length) setTimeout(syncSlice, 0, queue);
   else pending = null;
 }
@@ -63,5 +73,5 @@ Hooks.on("canvasInit", (canvas) => {
 Hooks.on("canvasDraw", () => {
   const queue = pending;
   pending = null;
-  while (queue?.length) queue.pop()._syncSenses();
+  while (queue?.length) prepareToken(queue.pop());
 });
